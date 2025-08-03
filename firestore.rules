@@ -1,0 +1,138 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Fonction pour vérifier si l'utilisateur est authentifié
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Fonction pour vérifier si l'utilisateur est le propriétaire du document
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    // Fonction pour vérifier si l'utilisateur est un producteur vérifié
+    function isVerifiedProducer() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/producers/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/producers/$(request.auth.uid)).data.isVerified == true;
+    }
+    
+    // Fonction pour vérifier si l'utilisateur est un investisseur vérifié
+    function isVerifiedInvestor() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/investors/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/investors/$(request.auth.uid)).data.isVerified == true;
+    }
+    
+    // Règles pour les utilisateurs
+    match /users/{userId} {
+      allow read, write: if isAuthenticated() && isOwner(userId);
+      allow read: if isAuthenticated(); // Permet aux autres utilisateurs de voir les profils publics
+    }
+    
+    // Règles pour les producteurs
+    match /producers/{producerId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isOwner(producerId);
+      allow create: if isAuthenticated() && isOwner(producerId) && 
+                    request.resource.data.keys().hasAll(['user', 'farmName', 'location', 'farmSizeHectares']);
+      allow update: if isAuthenticated() && isOwner(producerId) && 
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                      'farmName', 'description', 'location', 'farmSizeHectares', 
+                      'cashewTreesCount', 'expectedYieldKg', 'pricePerKg', 
+                      'certifications', 'farmImages', 'equipmentList', 'updatedAt'
+                    ]);
+    }
+    
+    // Règles pour les investisseurs
+    match /investors/{investorId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isOwner(investorId);
+      allow create: if isAuthenticated() && isOwner(investorId) && 
+                    request.resource.data.keys().hasAll(['user', 'investorType', 'availableFunds']);
+      allow update: if isAuthenticated() && isOwner(investorId) && 
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                      'availableFunds', 'investmentPreferences', 'preferredRegions',
+                      'minInvestmentAmount', 'maxInvestmentAmount', 'riskTolerance', 'updatedAt'
+                    ]);
+    }
+    
+    // Règles pour les projets
+    match /projects/{projectId} {
+      allow read: if isAuthenticated();
+      allow create: if isVerifiedProducer() && 
+                    request.resource.data.producerId == request.auth.uid &&
+                    request.resource.data.keys().hasAll(['name', 'description', 'fundingGoal', 'deadline']);
+      allow update: if isAuthenticated() && 
+                    (resource.data.producerId == request.auth.uid || // Le producteur peut modifier son projet
+                     request.resource.data.diff(resource.data).affectedKeys().hasOnly(['currentFunding', 'investorIds'])); // Mise à jour du financement
+      allow delete: if isAuthenticated() && resource.data.producerId == request.auth.uid;
+    }
+    
+    // Règles pour les investissements
+    match /investments/{investmentId} {
+      allow read: if isAuthenticated() && 
+                  (resource.data.investorId == request.auth.uid || 
+                   resource.data.producerId == request.auth.uid);
+      allow create: if isVerifiedInvestor() && 
+                    request.resource.data.investorId == request.auth.uid &&
+                    request.resource.data.keys().hasAll(['projectId', 'amount', 'paymentMethod']) &&
+                    request.resource.data.amount >= 10000; // Montant minimum
+      allow update: if isAuthenticated() && 
+                    (resource.data.investorId == request.auth.uid || 
+                     resource.data.producerId == request.auth.uid) &&
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']);
+    }
+    
+    // Règles pour les chats
+    match /chats/{chatId} {
+      allow read, write: if isAuthenticated() && 
+                         request.auth.uid in resource.data.participants;
+      allow create: if isAuthenticated() && 
+                    request.auth.uid in request.resource.data.participants &&
+                    request.resource.data.participants.size() == 2;
+    }
+    
+    // Règles pour les messages dans les chats
+    match /chats/{chatId}/messages/{messageId} {
+      allow read: if isAuthenticated() && 
+                  request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+      allow create: if isAuthenticated() && 
+                    request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants &&
+                    request.resource.data.senderId == request.auth.uid &&
+                    request.resource.data.keys().hasAll(['message', 'timestamp']);
+      allow update: if isAuthenticated() && 
+                    request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants &&
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+    }
+    
+    // Règles pour les notifications
+    match /notifications/{notificationId} {
+      allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated(); // Les notifications peuvent être créées par le système
+    }
+    
+    // Règles pour les évaluations et commentaires
+    match /reviews/{reviewId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+                    request.resource.data.reviewerId == request.auth.uid &&
+                    request.resource.data.keys().hasAll(['rating', 'comment', 'targetId', 'targetType']);
+      allow update: if isAuthenticated() && resource.data.reviewerId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.reviewerId == request.auth.uid;
+    }
+    
+    // Règles pour les rapports et statistiques (lecture seule pour les utilisateurs)
+    match /analytics/{document=**} {
+      allow read: if isAuthenticated();
+    }
+    
+    // Règles par défaut - Refuser tout accès non spécifié
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
